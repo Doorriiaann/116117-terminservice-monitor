@@ -1,0 +1,27 @@
+[project]
+name = "116117-terminservice-scraper"
+version = "1.0.0"
+description = "Scrapes the 116117 Terminservice and notifies about available appointments via Telegram."
+authors = [{ name = "Torben Wetter", email = "git@torben.id" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot (>=22.0,<23.0)",
+    "python-dotenv (>=1.1.0,<2.0.0)",
+    "selenium (>=4.32.0,<5.0.0)",
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.group.dev.dependencies]
+pylint = "^3.3.7"
+black = "^25.1.0"
+
+[tool.poetry.requires-plugins]
+poetry-plugin-export = ">=1.9"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
