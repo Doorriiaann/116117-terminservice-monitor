@@ -180,3 +180,4 @@ debug_*.png
 docs/superpowers/
 .worktrees/
 worktrees/
+.env
