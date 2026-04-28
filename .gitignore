@@ -171,3 +171,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+# Runtime state
+seen_appointments.json
+screenshot.png
+debug_*.png
+
+# Claude / Superpowers traces
+docs/superpowers/
+.worktrees/
+worktrees/
