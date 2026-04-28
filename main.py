@@ -116,51 +116,6 @@ def _accept_cookie_banner(driver) -> None:
         logger.error("Error accepting cookie banner: %s", exc)
 
 
-def _select_radius_150(driver) -> None:
-    """Select the 150 km Suchradius filter."""
-    wait = WebDriverWait(driver, 20)
-    try:
-        radius_header = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    (
-                        (
-                            "//div[contains(@class, 'ets-search-filter-distance') and @style]"
-                            "[@style='cursor: pointer;']"
-                            "//div[contains(@class, 'ets-search-filter-header')]"
-                        )
-                    ),
-                )
-            )
-        )
-        radius_header.click()
-        bubbles_container = wait.until(
-            EC.visibility_of_element_located(
-                (By.CSS_SELECTOR, ".ets-search-filter-distance-bubbles")
-            )
-        )
-        bubble_150 = bubbles_container.find_element(
-            By.XPATH,
-            (
-                ".//span[contains(@class, 'ets-search-filter-distance-bubble')]/label[text()='150']"
-            ),
-        )
-        bubble_150.click()
-        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "loading-icon")))
-        wait.until(EC.invisibility_of_element_located((By.CLASS_NAME, "loading-icon")))
-        logger.info("Selected 150 km Suchradius.")
-    except TimeoutException:
-        logger.warning("Timeout selecting 150 km Suchradius.")
-        sys.exit(1)
-    except NoSuchElementException as exc:
-        logger.error("Could not find Suchradius element(s): %s", exc.msg)
-        sys.exit(1)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Error selecting 150 km Suchradius: %s", exc)
-        sys.exit(1)
-
-
 def _wait_for_results(driver) -> None:
     """Wait for either an appointment result or a 'no results' message."""
     wait = WebDriverWait(driver, 40)
@@ -189,30 +144,6 @@ def _wait_for_results(driver) -> None:
         )
 
 
-def _check_radius_selected(driver) -> None:
-    """Check if 150km is selected in the UI."""
-    try:
-        radius_block = driver.find_element(
-            By.CSS_SELECTOR, ".ets-search-filter-distance"
-        )
-        selected_radius = radius_block.find_element(
-            By.CSS_SELECTOR, ".ets-search-filter-header .col-10 > span"
-        ).text.strip()
-        if "150" not in selected_radius:
-            logger.error("Radius selection failed! Got: %r", selected_radius)
-            raise ValueError(f"Radius selection failed! Got: {selected_radius!r}")
-        logger.info("Selected Suchradius: %r", selected_radius)
-    except NoSuchElementException as exc:
-        logger.error(
-            "Could not find Suchradius element(s) for radius check: %s",
-            exc.msg,
-        )
-        sys.exit(1)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Error checking radius selection: %s", exc)
-        sys.exit(1)
-
-
 def _find_appointments(driver) -> bool:
     """Return True if appointments found, False otherwise."""
     try:
@@ -236,14 +167,11 @@ def build_telegram_message(found: bool, booking_url: str) -> str:
         return (
             "<b>🎉 Termine verfügbar!</b>\n"
             f"<a href='{booking_url}'>Jetzt Termin sichern</a>\n"
-            "<i>Bitte Suchradius <b>+150 km</b> im Filter erneut auswählen "
-            "(wird nicht im Link gespeichert).</i>"
+            "<i>URL enthält bereits den richtigen Suchradius.</i>"
         )
     return (
         "<b>Keine Termine verfügbar.</b>\n"
-        f"<a href='{booking_url}'>Zur Übersicht</a>\n"
-        "<i>Bitte Suchradius <b>+150 km</b> im Filter erneut auswählen "
-        "(wird nicht im Link gespeichert).</i>"
+        f"<a href='{booking_url}'>Zur Übersicht</a>"
     )
 
 
@@ -252,11 +180,14 @@ def check_appointments(url: str = BOOKING_URL) -> bool:
     driver = None
     try:
         driver = get_webdriver()
+        logger.info("Loading URL: %s", url)
         driver.get(url)
         _wait_for_spinner(driver)
         _accept_cookie_banner(driver)
-        _select_radius_150(driver)
-        _check_radius_selected(driver)
+
+        # Radius is set via the ?suchradius= URL parameter — no UI interaction needed
+        logger.info("Using radius from URL (no manual selection needed)")
+
         _wait_for_results(driver)
 
         found = _find_appointments(driver)
