@@ -7,6 +7,9 @@ import os
 import logging
 import time
 from typing import Optional
+from dataclasses import dataclass
+import hashlib
+import json
 
 from dotenv import load_dotenv
 from selenium.webdriver import Chrome, ChromeOptions
@@ -27,6 +30,20 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Appointment:
+    date: str
+    time: str
+    location: str
+    distance_km: str
+
+    def uid(self) -> str:
+        """Stable identifier for deduplication across runs."""
+        raw = f"{self.date}|{self.time}|{self.location}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
 
 load_dotenv()
 
@@ -188,45 +205,114 @@ def _wait_for_results(driver) -> None:
         _debug_screenshot(driver, "timeout_results")
 
 
-def _find_appointments(driver) -> bool:
-    """Return True if appointments are present on the page."""
-    # Check for bookable time slot chips (the actual clickable appointment links)
-    chips = driver.find_elements(
-        By.CSS_SELECTOR, ".wp2-terminprofil-termine__chip"
-    )
-    if chips:
-        logger.info("Found %d bookable appointment slot(s).", len(chips))
-        return True
+def _scrape_appointments(driver) -> list[Appointment]:
+    """
+    Scrape structured appointment data from the results page.
+    Returns a list of Appointment objects.
+    Falls back to sentinel appointments if results are present but
+    structured data cannot be parsed (e.g., site markup changed).
+    """
+    appointments: list[Appointment] = []
 
-    # Check for appointment wrapper components
-    wrappers = driver.find_elements(
-        By.CSS_SELECTOR, "wp2-terminprofil-wrapper"
-    )
-    if wrappers:
-        logger.info("Found %d appointment group(s).", len(wrappers))
-        return True
+    # Each wp2-terminprofil-wrapper is one provider/location block
+    wrappers = driver.find_elements(By.CSS_SELECTOR, "wp2-terminprofil-wrapper")
+    logger.info("Found %d appointment wrapper(s).", len(wrappers))
 
-    # Check the results count text: "X TERMINE IM UMKREIS VON Y KM"
-    try:
-        count_el = driver.find_element(
-            By.XPATH, "//*[contains(text(), 'TERMINE IM UMKREIS')]"
+    for wrapper in wrappers:
+        # --- Extract location name ---
+        location = ""
+        for sel in [
+            ".wp2-terminprofil__name",
+            ".wp2-terminprofil-header__name",
+            "[class*='name']",
+        ]:
+            try:
+                location = wrapper.find_element(By.CSS_SELECTOR, sel).text.strip()
+                if location:
+                    break
+            except Exception:
+                pass
+
+        # --- Extract distance ---
+        distance_km = ""
+        for sel in [
+            ".wp2-terminprofil__entfernung",
+            ".wp2-terminprofil-header__entfernung",
+            "[class*='entfernung']",
+            "[class*='distance']",
+        ]:
+            try:
+                distance_km = wrapper.find_element(By.CSS_SELECTOR, sel).text.strip()
+                if distance_km:
+                    break
+            except Exception:
+                pass
+
+        # --- Extract time chips ---
+        chips = wrapper.find_elements(
+            By.CSS_SELECTOR, ".wp2-terminprofil-termine__chip"
         )
-        count_text = count_el.text.strip()
-        logger.info("Results header: %r", count_text)
-        # "0 TERMINE" means nothing found
-        if count_text.startswith("0 "):
-            return False
-        return True
-    except Exception:
-        pass
+        for chip in chips:
+            chip_text = chip.text.strip()
+            lines = [ln.strip() for ln in chip_text.splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                date_part = lines[0]
+                time_part = lines[1]
+            elif len(lines) == 1:
+                parts = lines[0].split()
+                date_part = " ".join(parts[:-1]) if len(parts) > 1 else lines[0]
+                time_part = parts[-1] if len(parts) > 1 else ""
+            else:
+                continue
+            appointments.append(
+                Appointment(
+                    date=date_part,
+                    time=time_part,
+                    location=location or "Unbekannt",
+                    distance_km=distance_km or "?",
+                )
+            )
 
-    # Fallback: check page source for Nächster freier Termin
-    if "nächster freier termin" in driver.page_source.lower():
-        logger.info("Found 'Nächster freier Termin' in page source.")
-        return True
+    # Fallback: if no wrappers but chips exist, site markup may have changed
+    if not wrappers:
+        chips_global = driver.find_elements(
+            By.CSS_SELECTOR, ".wp2-terminprofil-termine__chip"
+        )
+        if chips_global:
+            logger.warning(
+                "Found %d chips outside wrappers — site markup may have changed.",
+                len(chips_global),
+            )
+            appointments.append(
+                Appointment(
+                    date="Unbekannt",
+                    time="Unbekannt",
+                    location="Unbekannt",
+                    distance_km="?",
+                )
+            )
+        else:
+            # Last resort: check count text
+            try:
+                count_el = driver.find_element(
+                    By.XPATH, "//*[contains(text(), 'TERMINE IM UMKREIS')]"
+                )
+                count_text = count_el.text.strip()
+                logger.info("Results header: %r", count_text)
+                if not count_text.startswith("0 "):
+                    appointments.append(
+                        Appointment(
+                            date="Unbekannt",
+                            time="Unbekannt",
+                            location="Unbekannt",
+                            distance_km="?",
+                        )
+                    )
+            except Exception:
+                pass
 
-    logger.info("No appointment indicators found.")
-    return False
+    logger.info("Scraped %d appointment(s).", len(appointments))
+    return appointments
 
 
 def build_telegram_message(found: bool, booking_url: str) -> str:
@@ -261,7 +347,8 @@ def check_appointments(url: str = BOOKING_URL) -> bool:
         _wait_for_results(driver)
         _debug_screenshot(driver, "02_results")
 
-        found = _find_appointments(driver)
+        appointments = _scrape_appointments(driver)
+        found = bool(appointments)
 
         return found
 
