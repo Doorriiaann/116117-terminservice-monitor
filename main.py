@@ -5,7 +5,7 @@ Scrapes the 116117 Terminservice and notifies about available appointments via T
 import asyncio
 import os
 import logging
-import sys
+import time
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -15,7 +15,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException,
-    NoSuchElementException,
     WebDriverException,
 )
 from telegram import Bot
@@ -42,6 +41,8 @@ if not BOOKING_URL or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     logger.critical(ERROR_MSG)
     raise RuntimeError(ERROR_MSG)
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def get_webdriver() -> Chrome:
     """Create and return a configured Chrome WebDriver in headless mode."""
@@ -64,6 +65,16 @@ def get_webdriver() -> Chrome:
         raise
 
 
+def _debug_screenshot(driver, name: str) -> None:
+    """Save a debug screenshot to help diagnose issues."""
+    path = os.path.join(SCRIPT_DIR, f"debug_{name}.png")
+    try:
+        driver.save_screenshot(path)
+        logger.info("Debug screenshot: %s", path)
+    except Exception as exc:
+        logger.warning("Could not save debug screenshot %s: %s", name, exc)
+
+
 async def send_telegram_photo(
     token: str, chat_id: str, message: str, photo_path: str
 ) -> None:
@@ -79,86 +90,139 @@ async def send_telegram_photo(
                     parse_mode=ParseMode.HTML,
                 )
         logger.info("Sent Telegram notification with screenshot.")
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:
         logger.error("Failed to send Telegram photo: %s", exc)
         raise
 
 
-def _wait_for_spinner(driver) -> None:
-    """Wait for the loading spinner to disappear."""
-    try:
-        WebDriverWait(driver, 30).until(
-            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".loading-icon"))
-        )
-    except TimeoutException:
-        logger.warning("Timeout waiting for spinner to disappear.")
-
-
 def _accept_cookie_banner(driver) -> None:
-    """Try to accept the cookie banner if present."""
-    try:
-        cookie_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    (
-                        "//a[contains(@class, 'cookies-info-close') "
-                        "and contains(., 'Auswahl bestätigen')]"
-                    ),
-                )
+    """Try to accept the cookie banner. Tries multiple selectors for resilience."""
+    selectors = [
+        # 116117-termine.de / eterminservice.de current: button "AUSWAHL BESTÄTIGEN"
+        (
+            By.XPATH,
+            (
+                "//button[contains(translate(., 'abcdefghijklmnopqrstuvwxyz',"
+                " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'AUSWAHL BESTÄTIGEN')]"
+            ),
+        ),
+        # Legacy eterminservice.de: <a class="cookies-info-close">
+        (
+            By.XPATH,
+            "//a[contains(@class, 'cookies-info-close')]",
+        ),
+        # Generic fallback: anything clickable with "bestätigen"
+        (
+            By.XPATH,
+            (
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                " 'abcdefghijklmnopqrstuvwxyz'), 'auswahl bestätigen')]"
+            ),
+        ),
+    ]
+    for by, selector in selectors:
+        try:
+            btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((by, selector))
             )
-        )
-        cookie_btn.click()
-        logger.info("Accepted cookie banner.")
-    except TimeoutException:
-        logger.info("No cookie banner present.")
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Error accepting cookie banner: %s", exc)
+            btn.click()
+            logger.info("Accepted cookie banner via: %s", selector[:60])
+            time.sleep(1)
+            return
+        except TimeoutException:
+            continue
+        except Exception as exc:
+            logger.warning("Cookie selector error (%s): %s", selector[:40], exc)
+            continue
+    logger.info("No cookie banner found (%d selectors tried).", len(selectors))
+
+
+def _wait_for_page_ready(driver) -> None:
+    """Wait for spinners to clear and document to be ready."""
+    spinner_selectors = [".loading-icon", ".spinner", ".loading", "[class*='loading']"]
+    for sel in spinner_selectors:
+        try:
+            WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+            )
+            logger.info("Spinner appeared (%s), waiting...", sel)
+            WebDriverWait(driver, 30).until(
+                EC.invisibility_of_element_located((By.CSS_SELECTOR, sel))
+            )
+            logger.info("Spinner gone (%s).", sel)
+        except TimeoutException:
+            pass
+
+    WebDriverWait(driver, 10).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
 
 
 def _wait_for_results(driver) -> None:
-    """Wait for either an appointment result or a 'no results' message."""
-    wait = WebDriverWait(driver, 40)
+    """Wait for results or a no-results message to appear on the page."""
+    wait = WebDriverWait(driver, 45)
     try:
         wait.until(
             EC.any_of(
+                # 116117-termine.de: "Gefundene Termine" heading when results exist
+                EC.presence_of_element_located(
+                    (By.XPATH, "//*[contains(text(), 'Gefundene Termine')]")
+                ),
+                # 116117-termine.de: "Verfügbare" text in result items
+                EC.presence_of_element_located(
+                    (By.XPATH, "//*[contains(text(), 'Verfügbare')]")
+                ),
+                # eterminservice.de: result item CSS classes
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".search-results-item, .ets-search-results-item")
+                ),
+                # Various no-results messages
                 EC.presence_of_element_located(
                     (
                         By.XPATH,
                         (
-                            "//*[contains(text(), 'Ihre Suche ergab leider keine Treffer')]"
+                            "//*[contains(text(), 'keine Treffer')"
+                            " or contains(text(), 'Keine Termine')"
+                            " or contains(text(), 'keine Termine')]"
                         ),
-                    )
-                ),
-                EC.presence_of_element_located(
-                    (
-                        By.CSS_SELECTOR,
-                        ".search-results-item.ets-search-results-item",
                     )
                 ),
             )
         )
+        logger.info("Results section detected.")
     except TimeoutException:
-        logger.warning(
-            "Timeout waiting for appointment results or 'no results' message."
-        )
+        logger.warning("Timeout (45s) waiting for results.")
+        _debug_screenshot(driver, "timeout_results")
 
 
 def _find_appointments(driver) -> bool:
-    """Return True if appointments found, False otherwise."""
-    try:
-        no_results = driver.find_elements(
-            By.XPATH, "//*[contains(text(), 'Ihre Suche ergab leider keine Treffer')]"
-        )
-        appointments = driver.find_elements(
-            By.CSS_SELECTOR, ".search-results-item.ets-search-results-item"
-        )
-        found = not no_results and bool(appointments)
-        logger.info("Appointments found: %s", found)
-        return found
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Error finding appointments: %s", exc)
-        raise
+    """Return True if appointments are present on the page."""
+    page_text = driver.page_source.lower()
+
+    # Explicit no-results indicators
+    no_result_phrases = ["keine treffer", "keine termine", "leider keine"]
+    for phrase in no_result_phrases:
+        if phrase in page_text:
+            logger.info("No-results phrase matched: %r", phrase)
+            return False
+
+    # Positive indicators (any match = appointments found)
+    positive_selectors = [
+        (By.XPATH, "//*[contains(text(), 'Gefundene Termine')]"),
+        (By.XPATH, "//*[contains(text(), 'Verfügbare')]"),
+        (By.CSS_SELECTOR, ".search-results-item, .ets-search-results-item"),
+        (By.CSS_SELECTOR, "[class*='termin'][class*='liste'], [class*='terminliste']"),
+    ]
+    for by, sel in positive_selectors:
+        elems = driver.find_elements(by, sel)
+        if elems:
+            logger.info(
+                "Appointments detected (%d elements): %s", len(elems), sel[:60]
+            )
+            return True
+
+    logger.info("No appointment indicators found on page.")
+    return False
 
 
 def build_telegram_message(found: bool, booking_url: str) -> str:
@@ -167,7 +231,7 @@ def build_telegram_message(found: bool, booking_url: str) -> str:
         return (
             "<b>🎉 Termine verfügbar!</b>\n"
             f"<a href='{booking_url}'>Jetzt Termin sichern</a>\n"
-            "<i>URL enthält bereits den richtigen Suchradius.</i>"
+            "<i>URL enthält bereits den Suchradius.</i>"
         )
     return (
         "<b>Keine Termine verfügbar.</b>\n"
@@ -176,62 +240,71 @@ def build_telegram_message(found: bool, booking_url: str) -> str:
 
 
 def check_appointments(url: str = BOOKING_URL) -> bool:
-    """Checks for available appointments and sends a Telegram notification with a screenshot."""
+    """Check for available appointments and send Telegram notification if found."""
     driver = None
     try:
         driver = get_webdriver()
-        logger.info("Loading URL: %s", url)
+        logger.info("Loading: %s", url)
         driver.get(url)
-        _wait_for_spinner(driver)
-        _accept_cookie_banner(driver)
 
-        # Radius is set via the ?suchradius= URL parameter — no UI interaction needed
-        logger.info("Using radius from URL (no manual selection needed)")
+        _wait_for_page_ready(driver)
+        _debug_screenshot(driver, "01_page_loaded")
+
+        _accept_cookie_banner(driver)
+        _debug_screenshot(driver, "02_after_cookie")
+
+        logger.info("Radius set via URL parameter — skipping UI selection.")
 
         _wait_for_results(driver)
+        _debug_screenshot(driver, "03_results")
 
         found = _find_appointments(driver)
-        if found:
-            msg = build_telegram_message(found, url)
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            screenshot_path = os.path.join(current_dir, "screenshot.png")
+
+        # Always save final screenshot
+        screenshot_path = os.path.join(SCRIPT_DIR, "screenshot.png")
+        try:
+            driver.save_screenshot(screenshot_path)
+            logger.info("Final screenshot: %s", screenshot_path)
+        except Exception as exc:
+            logger.error("Failed to save final screenshot: %s", exc)
+            screenshot_path = None
+
+        if found and screenshot_path:
+            msg = build_telegram_message(True, url)
             try:
-                driver.save_screenshot(screenshot_path)
-                logger.info("Screenshot saved to %s", screenshot_path)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error("Failed to save screenshot: %s", exc)
-                screenshot_path = None
-            if screenshot_path:
-                try:
-                    asyncio.run(
-                        send_telegram_photo(
-                            TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg, screenshot_path
-                        )
+                asyncio.run(
+                    send_telegram_photo(
+                        TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg, screenshot_path
                     )
-                except Exception as exc:  # pylint: disable=broad-except
-                    logger.error("Failed to send Telegram notification: %s", exc)
+                )
+            except Exception as exc:
+                logger.error("Telegram send failed: %s", exc)
+
         return found
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Error during appointment check: %s", exc)
+
+    except Exception as exc:
+        logger.error("Error during check: %s", exc)
+        if driver:
+            _debug_screenshot(driver, "error")
         raise
     finally:
         if driver:
             try:
                 driver.quit()
                 logger.info("WebDriver closed.")
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception as exc:
                 logger.error("Error closing WebDriver: %s", exc)
 
 
 def main() -> None:
-    """Main entry point for the script."""
+    """Main entry point."""
     try:
         found = check_appointments()
         if found:
             logger.info("Appointment found!")
         else:
             logger.info("No appointment found.")
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:
         logger.critical("Unhandled error in main: %s", exc)
 
 
