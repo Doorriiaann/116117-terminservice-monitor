@@ -247,6 +247,8 @@ def _scrape_appointments(driver) -> list[Appointment]:
             try:
                 distance_km = wrapper.find_element(By.CSS_SELECTOR, sel).text.strip()
                 if distance_km:
+                    # Drop "Auf der Karte zeigen" button text that gets scraped alongside the distance
+                    distance_km = distance_km.splitlines()[0].strip()
                     break
             except Exception:
                 pass
@@ -351,10 +353,9 @@ def build_telegram_message(new_appointments: list[Appointment], booking_url: str
     lines.append("")
     for appt in new_appointments:
         lines.append(
-            f"Datum: {html.escape(appt.date)}\n"
-            f"Zeit: {html.escape(appt.time)}\n"
             f"Praxis: {html.escape(appt.location)}\n"
-            f"Entfernung: {html.escape(appt.distance_km)}"
+            f"Entfernung: {html.escape(appt.distance_km)}\n"
+            f"Datum: {html.escape(appt.date)}"
         )
         lines.append("")
     return "\n".join(lines).strip()
