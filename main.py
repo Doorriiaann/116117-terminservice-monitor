@@ -348,7 +348,8 @@ def filter_new_appointments(
 
 def build_telegram_message(new_appointments: list[Appointment], booking_url: str) -> str:
     """Build an HTML-formatted message listing new appointments."""
-    lines = [f"<b>Neue Termine verfuegbar ({len(new_appointments)})</b>"]
+    distances = ", ".join(html.escape(a.distance_km) for a in new_appointments)
+    lines = [f"<b>Neue Termine: {distances}</b>"]
     lines.append(f'<a href="{booking_url}">Jetzt buchen</a>')
     lines.append("")
     for appt in new_appointments:
