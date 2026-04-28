@@ -33,6 +33,7 @@ load_dotenv()
 BOOKING_URL: Optional[str] = os.getenv("BOOKING_URL")
 TELEGRAM_TOKEN: Optional[str] = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
+DEBUG_SAVE_IMAGES: bool = os.getenv("DEBUG_SAVE_IMAGES", "").lower() in ("1", "true", "yes")
 
 if not BOOKING_URL or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     ERROR_MSG = (
@@ -66,7 +67,9 @@ def get_webdriver() -> Chrome:
 
 
 def _debug_screenshot(driver, name: str) -> None:
-    """Save a debug screenshot."""
+    """Save a debug screenshot. Only runs when DEBUG_SAVE_IMAGES=true."""
+    if not DEBUG_SAVE_IMAGES:
+        return
     path = os.path.join(SCRIPT_DIR, f"debug_{name}.png")
     try:
         driver.save_screenshot(path)
@@ -259,24 +262,6 @@ def check_appointments(url: str = BOOKING_URL) -> bool:
         _debug_screenshot(driver, "02_results")
 
         found = _find_appointments(driver)
-
-        screenshot_path = os.path.join(SCRIPT_DIR, "screenshot.png")
-        try:
-            driver.save_screenshot(screenshot_path)
-        except Exception as exc:
-            logger.error("Failed to save screenshot: %s", exc)
-            screenshot_path = None
-
-        if found and screenshot_path:
-            msg = build_telegram_message(True, url)
-            try:
-                asyncio.run(
-                    send_telegram_photo(
-                        TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg, screenshot_path
-                    )
-                )
-            except Exception as exc:
-                logger.error("Telegram send failed: %s", exc)
 
         return found
 
