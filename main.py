@@ -96,23 +96,19 @@ def _debug_screenshot(driver, name: str) -> None:
         logger.warning("Could not save debug screenshot %s: %s", name, exc)
 
 
-async def send_telegram_photo(
-    token: str, chat_id: str, message: str, photo_path: str
-) -> None:
-    """Send a photo with a message to a Telegram chat."""
+async def send_telegram_message(token: str, chat_id: str, message: str) -> None:
+    """Send a plain text message to a Telegram chat."""
     bot = Bot(token=token)
     try:
         async with bot:
-            with open(photo_path, "rb") as photo_file:
-                await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo_file,
-                    caption=message,
-                    parse_mode=ParseMode.HTML,
-                )
-        logger.info("Sent Telegram notification with screenshot.")
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode=ParseMode.HTML,
+            )
+        logger.info("Sent Telegram notification.")
     except Exception as exc:
-        logger.error("Failed to send Telegram photo: %s", exc)
+        logger.error("Failed to send Telegram message: %s", exc)
         raise
 
 
@@ -353,18 +349,20 @@ def filter_new_appointments(
     return new_appointments, updated_seen
 
 
-def build_telegram_message(found: bool, booking_url: str) -> str:
-    """Build the HTML message for Telegram notification."""
-    if found:
-        return (
-            "<b>🎉 Termine verfügbar!</b>\n"
-            f"<a href='{booking_url}'>Jetzt Termin sichern</a>\n"
-            "<i>URL enthält bereits den Suchradius.</i>"
+def build_telegram_message(new_appointments: list[Appointment], booking_url: str) -> str:
+    """Build a plain-text HTML message listing new appointments."""
+    lines = [f"<b>Neue Termine verfuegbar ({len(new_appointments)})</b>"]
+    lines.append(f'<a href="{booking_url}">Jetzt buchen</a>')
+    lines.append("")
+    for appt in new_appointments:
+        lines.append(
+            f"Datum: {appt.date}\n"
+            f"Zeit: {appt.time}\n"
+            f"Praxis: {appt.location}\n"
+            f"Entfernung: {appt.distance_km}"
         )
-    return (
-        "<b>Keine Termine verfügbar.</b>\n"
-        f"<a href='{booking_url}'>Zur Übersicht</a>"
-    )
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def check_appointments(url: str = BOOKING_URL) -> bool:
