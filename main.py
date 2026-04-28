@@ -365,8 +365,11 @@ def build_telegram_message(new_appointments: list[Appointment], booking_url: str
     return "\n".join(lines).strip()
 
 
-def check_appointments(url: str = BOOKING_URL) -> bool:
-    """Check for available appointments and send Telegram notification if found."""
+def check_appointments(url: str = BOOKING_URL) -> list[Appointment]:
+    """
+    Scrape available appointments, filter against seen state, notify for new ones.
+    Returns list of newly found appointments.
+    """
     driver = None
     try:
         driver = get_webdriver()
@@ -384,9 +387,23 @@ def check_appointments(url: str = BOOKING_URL) -> bool:
         _debug_screenshot(driver, "02_results")
 
         appointments = _scrape_appointments(driver)
-        found = bool(appointments)
 
-        return found
+        seen = load_seen_appointments()
+        new_appointments, updated_seen = filter_new_appointments(appointments, seen)
+        save_seen_appointments(updated_seen)
+
+        if new_appointments:
+            msg = build_telegram_message(new_appointments, url)
+            try:
+                asyncio.run(
+                    send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
+                )
+            except Exception as exc:
+                logger.error("Telegram send failed: %s", exc)
+        else:
+            logger.info("No new appointments since last run.")
+
+        return new_appointments
 
     except Exception as exc:
         logger.error("Error during check: %s", exc)
@@ -405,11 +422,11 @@ def check_appointments(url: str = BOOKING_URL) -> bool:
 def main() -> None:
     """Main entry point."""
     try:
-        found = check_appointments()
-        if found:
-            logger.info("Appointment found!")
+        new_appointments = check_appointments()
+        if new_appointments:
+            logger.info("%d new appointment(s) found.", len(new_appointments))
         else:
-            logger.info("No appointment found.")
+            logger.info("No new appointments found.")
     except Exception as exc:
         logger.critical("Unhandled error in main: %s", exc)
 
