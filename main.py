@@ -341,6 +341,18 @@ def save_seen_appointments(seen: set[str]) -> None:
         logger.error("Could not write state file: %s", exc)
 
 
+def filter_new_appointments(
+    appointments: list[Appointment], seen: set[str]
+) -> tuple[list[Appointment], set[str]]:
+    """
+    Return only appointments whose UID is not in seen, plus the updated seen set.
+    The updated seen set includes all current appointments (new and existing).
+    """
+    new_appointments = [a for a in appointments if a.uid() not in seen]
+    updated_seen = seen | {a.uid() for a in appointments}
+    return new_appointments, updated_seen
+
+
 def build_telegram_message(found: bool, booking_url: str) -> str:
     """Build the HTML message for Telegram notification."""
     if found:
