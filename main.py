@@ -66,7 +66,7 @@ def get_webdriver() -> Chrome:
 
 
 def _debug_screenshot(driver, name: str) -> None:
-    """Save a debug screenshot to help diagnose issues."""
+    """Save a debug screenshot."""
     path = os.path.join(SCRIPT_DIR, f"debug_{name}.png")
     try:
         driver.save_screenshot(path)
@@ -96,28 +96,21 @@ async def send_telegram_photo(
 
 
 def _accept_cookie_banner(driver) -> None:
-    """Try to accept the cookie banner. Tries multiple selectors for resilience."""
+    """Try to accept the cookie banner if present."""
     selectors = [
-        # 116117-termine.de / eterminservice.de current: button "AUSWAHL BESTÄTIGEN"
+        # Current button style: "AUSWAHL BESTÄTIGEN"
         (
             By.XPATH,
-            (
-                "//button[contains(translate(., 'abcdefghijklmnopqrstuvwxyz',"
-                " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'AUSWAHL BESTÄTIGEN')]"
-            ),
+            "//button[contains(translate(., 'abcdefghijklmnopqrstuvwxyz',"
+            " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'AUSWAHL BESTÄTIGEN')]",
         ),
-        # Legacy eterminservice.de: <a class="cookies-info-close">
+        # Legacy eterminservice.de
+        (By.XPATH, "//a[contains(@class, 'cookies-info-close')]"),
+        # Generic fallback
         (
             By.XPATH,
-            "//a[contains(@class, 'cookies-info-close')]",
-        ),
-        # Generic fallback: anything clickable with "bestätigen"
-        (
-            By.XPATH,
-            (
-                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                " 'abcdefghijklmnopqrstuvwxyz'), 'auswahl bestätigen')]"
-            ),
+            "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+            " 'abcdefghijklmnopqrstuvwxyz'), 'auswahl bestätigen')]",
         ),
     ]
     for by, selector in selectors:
@@ -126,102 +119,110 @@ def _accept_cookie_banner(driver) -> None:
                 EC.element_to_be_clickable((by, selector))
             )
             btn.click()
-            logger.info("Accepted cookie banner via: %s", selector[:60])
+            logger.info("Accepted cookie banner.")
             time.sleep(1)
             return
         except TimeoutException:
             continue
         except Exception as exc:
-            logger.warning("Cookie selector error (%s): %s", selector[:40], exc)
+            logger.warning("Cookie selector error: %s", exc)
             continue
-    logger.info("No cookie banner found (%d selectors tried).", len(selectors))
+    logger.info("No cookie banner found.")
 
 
 def _wait_for_page_ready(driver) -> None:
-    """Wait for spinners to clear and document to be ready."""
-    spinner_selectors = [".loading-icon", ".spinner", ".loading", "[class*='loading']"]
-    for sel in spinner_selectors:
+    """Wait for spinners to clear and document ready."""
+    for sel in [".loading-icon", ".spinner", "[class*='loading']"]:
         try:
             WebDriverWait(driver, 3).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, sel))
             )
-            logger.info("Spinner appeared (%s), waiting...", sel)
             WebDriverWait(driver, 30).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, sel))
             )
-            logger.info("Spinner gone (%s).", sel)
         except TimeoutException:
             pass
-
     WebDriverWait(driver, 10).until(
         lambda d: d.execute_script("return document.readyState") == "complete"
     )
 
 
 def _wait_for_results(driver) -> None:
-    """Wait for results or a no-results message to appear on the page."""
+    """Wait for the 116117-termine.de results page to render."""
     wait = WebDriverWait(driver, 45)
     try:
         wait.until(
             EC.any_of(
-                # 116117-termine.de: "Gefundene Termine" heading when results exist
+                # 116117-termine.de: Angular appointment wrapper component
                 EC.presence_of_element_located(
-                    (By.XPATH, "//*[contains(text(), 'Gefundene Termine')]")
+                    (By.CSS_SELECTOR, "wp2-terminprofil-wrapper")
                 ),
-                # 116117-termine.de: "Verfügbare" text in result items
+                # 116117-termine.de: results count "X TERMINE IM UMKREIS"
                 EC.presence_of_element_located(
-                    (By.XPATH, "//*[contains(text(), 'Verfügbare')]")
+                    (By.XPATH, "//*[contains(text(), 'TERMINE IM UMKREIS')]")
                 ),
-                # eterminservice.de: result item CSS classes
+                # 116117-termine.de: "Suchergebnisse" heading
                 EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".search-results-item, .ets-search-results-item")
+                    (By.XPATH, "//*[contains(text(), 'Suchergebnisse')]")
                 ),
-                # Various no-results messages
+                # 116117-termine.de: bookable time slot chips
                 EC.presence_of_element_located(
-                    (
-                        By.XPATH,
-                        (
-                            "//*[contains(text(), 'keine Treffer')"
-                            " or contains(text(), 'Keine Termine')"
-                            " or contains(text(), 'keine Termine')]"
-                        ),
-                    )
+                    (By.CSS_SELECTOR, ".wp2-terminprofil-termine__chip")
+                ),
+                # 116117-terme.de: no results — "Umkreis erweitern" without any termine
+                EC.presence_of_element_located(
+                    (By.XPATH, "//*[contains(text(), 'Umkreis erweitern')]")
+                ),
+                # 116117-terme.de: 0 results
+                EC.presence_of_element_located(
+                    (By.XPATH, "//*[contains(text(), '0 TERMINE')]")
                 ),
             )
         )
-        logger.info("Results section detected.")
+        logger.info("Results page detected.")
     except TimeoutException:
-        logger.warning("Timeout (45s) waiting for results.")
+        logger.warning("Timeout (45s) waiting for results page.")
         _debug_screenshot(driver, "timeout_results")
 
 
 def _find_appointments(driver) -> bool:
     """Return True if appointments are present on the page."""
-    page_text = driver.page_source.lower()
+    # Check for bookable time slot chips (the actual clickable appointment links)
+    chips = driver.find_elements(
+        By.CSS_SELECTOR, ".wp2-terminprofil-termine__chip"
+    )
+    if chips:
+        logger.info("Found %d bookable appointment slot(s).", len(chips))
+        return True
 
-    # Explicit no-results indicators
-    no_result_phrases = ["keine treffer", "keine termine", "leider keine"]
-    for phrase in no_result_phrases:
-        if phrase in page_text:
-            logger.info("No-results phrase matched: %r", phrase)
+    # Check for appointment wrapper components
+    wrappers = driver.find_elements(
+        By.CSS_SELECTOR, "wp2-terminprofil-wrapper"
+    )
+    if wrappers:
+        logger.info("Found %d appointment group(s).", len(wrappers))
+        return True
+
+    # Check the results count text: "X TERMINE IM UMKREIS VON Y KM"
+    try:
+        count_el = driver.find_element(
+            By.XPATH, "//*[contains(text(), 'TERMINE IM UMKREIS')]"
+        )
+        count_text = count_el.text.strip()
+        logger.info("Results header: %r", count_text)
+        # "0 TERMINE" means nothing found
+        if count_text.startswith("0 "):
             return False
+        return True
+    except Exception:
+        pass
 
-    # Positive indicators (any match = appointments found)
-    positive_selectors = [
-        (By.XPATH, "//*[contains(text(), 'Gefundene Termine')]"),
-        (By.XPATH, "//*[contains(text(), 'Verfügbare')]"),
-        (By.CSS_SELECTOR, ".search-results-item, .ets-search-results-item"),
-        (By.CSS_SELECTOR, "[class*='termin'][class*='liste'], [class*='terminliste']"),
-    ]
-    for by, sel in positive_selectors:
-        elems = driver.find_elements(by, sel)
-        if elems:
-            logger.info(
-                "Appointments detected (%d elements): %s", len(elems), sel[:60]
-            )
-            return True
+    # Fallback: check page source for Nächster freier Termin
+    if "nächster freier termin" in driver.page_source.lower():
+        logger.info("Found 'Nächster freier Termin' in page source.")
+        return True
 
-    logger.info("No appointment indicators found on page.")
+    logger.info("No appointment indicators found.")
     return False
 
 
@@ -251,22 +252,19 @@ def check_appointments(url: str = BOOKING_URL) -> bool:
         _debug_screenshot(driver, "01_page_loaded")
 
         _accept_cookie_banner(driver)
-        _debug_screenshot(driver, "02_after_cookie")
 
-        logger.info("Radius set via URL parameter — skipping UI selection.")
+        logger.info("Radius set via URL parameter.")
 
         _wait_for_results(driver)
-        _debug_screenshot(driver, "03_results")
+        _debug_screenshot(driver, "02_results")
 
         found = _find_appointments(driver)
 
-        # Always save final screenshot
         screenshot_path = os.path.join(SCRIPT_DIR, "screenshot.png")
         try:
             driver.save_screenshot(screenshot_path)
-            logger.info("Final screenshot: %s", screenshot_path)
         except Exception as exc:
-            logger.error("Failed to save final screenshot: %s", exc)
+            logger.error("Failed to save screenshot: %s", exc)
             screenshot_path = None
 
         if found and screenshot_path:
