@@ -60,6 +60,7 @@ if not BOOKING_URL or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     raise RuntimeError(ERROR_MSG)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(SCRIPT_DIR, "seen_appointments.json")
 
 
 def get_webdriver() -> Chrome:
@@ -313,6 +314,31 @@ def _scrape_appointments(driver) -> list[Appointment]:
 
     logger.info("Scraped %d appointment(s).", len(appointments))
     return appointments
+
+
+def load_seen_appointments() -> set[str]:
+    """Load UIDs of previously seen appointments from disk."""
+    if not os.path.exists(STATE_FILE):
+        return set()
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return set(data)
+        logger.warning("State file format unexpected, starting fresh.")
+        return set()
+    except Exception as exc:
+        logger.warning("Could not read state file: %s", exc)
+        return set()
+
+
+def save_seen_appointments(seen: set[str]) -> None:
+    """Persist UIDs of seen appointments to disk."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(seen), f, indent=2)
+    except Exception as exc:
+        logger.error("Could not write state file: %s", exc)
 
 
 def build_telegram_message(found: bool, booking_url: str) -> str:
