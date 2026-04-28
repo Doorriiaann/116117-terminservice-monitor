@@ -3,6 +3,7 @@ Scrapes the 116117 Terminservice and notifies about available appointments via T
 """
 
 import asyncio
+import html
 import os
 import logging
 import time
@@ -40,7 +41,12 @@ class Appointment:
     distance_km: str
 
     def uid(self) -> str:
-        """Stable identifier for deduplication across runs."""
+        """
+        Stable identifier for deduplication across runs.
+        Uses date+time+location only — distance_km is excluded because it may
+        vary slightly between scrapes for the same slot.
+        Truncated to 16 hex chars (64 bits), sufficient for O(thousands) slots.
+        """
         raw = f"{self.date}|{self.time}|{self.location}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -277,16 +283,9 @@ def _scrape_appointments(driver) -> list[Appointment]:
         )
         if chips_global:
             logger.warning(
-                "Found %d chips outside wrappers — site markup may have changed.",
+                "Found %d chips outside wrappers — site markup may have changed. "
+                "Cannot parse appointment details. Check the site manually.",
                 len(chips_global),
-            )
-            appointments.append(
-                Appointment(
-                    date="Unbekannt",
-                    time="Unbekannt",
-                    location="Unbekannt",
-                    distance_km="?",
-                )
             )
         else:
             # Last resort: check count text
@@ -297,13 +296,9 @@ def _scrape_appointments(driver) -> list[Appointment]:
                 count_text = count_el.text.strip()
                 logger.info("Results header: %r", count_text)
                 if not count_text.startswith("0 "):
-                    appointments.append(
-                        Appointment(
-                            date="Unbekannt",
-                            time="Unbekannt",
-                            location="Unbekannt",
-                            distance_km="?",
-                        )
+                    logger.warning(
+                        "Results header indicates appointments exist but no "
+                        "structured data could be parsed. Check the site manually."
                     )
             except Exception:
                 pass
@@ -350,16 +345,16 @@ def filter_new_appointments(
 
 
 def build_telegram_message(new_appointments: list[Appointment], booking_url: str) -> str:
-    """Build a plain-text HTML message listing new appointments."""
+    """Build an HTML-formatted message listing new appointments."""
     lines = [f"<b>Neue Termine verfuegbar ({len(new_appointments)})</b>"]
     lines.append(f'<a href="{booking_url}">Jetzt buchen</a>')
     lines.append("")
     for appt in new_appointments:
         lines.append(
-            f"Datum: {appt.date}\n"
-            f"Zeit: {appt.time}\n"
-            f"Praxis: {appt.location}\n"
-            f"Entfernung: {appt.distance_km}"
+            f"Datum: {html.escape(appt.date)}\n"
+            f"Zeit: {html.escape(appt.time)}\n"
+            f"Praxis: {html.escape(appt.location)}\n"
+            f"Entfernung: {html.escape(appt.distance_km)}"
         )
         lines.append("")
     return "\n".join(lines).strip()
@@ -380,8 +375,6 @@ def check_appointments(url: str = BOOKING_URL) -> list[Appointment]:
         _debug_screenshot(driver, "01_page_loaded")
 
         _accept_cookie_banner(driver)
-
-        logger.info("Radius set via URL parameter.")
 
         _wait_for_results(driver)
         _debug_screenshot(driver, "02_results")
